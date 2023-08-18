@@ -7,7 +7,6 @@ import org.springframework.batch.item.ExecutionContext;
 import org.springframework.batch.item.ItemProcessor;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.web.client.HttpClientErrorException;
 import com.retooling.batch.entity.Chicken;
 import com.retooling.batch.entity.Egg;
 import com.retooling.batch.entity.Farm;
@@ -16,13 +15,13 @@ public class Step2Processor implements ItemProcessor<Chicken, Chicken>{
 
 	private static final Logger logger = LoggerFactory.getLogger(Step2Processor.class);
 
-	private Farm farm; 
+	int chickensPutEggs;
+	int newEggsByChicken;
+	int eggsDiscarted;
+	String isEggsLimit;
 	
 	@Autowired
 	private ApiCall apiCall;
-	
-	@Value("${api.microservice.use-date-simulator}")
-	private boolean useDateSimulator;
 
 	@Value("${batch.config.days-amount-eggs}")
 	private int daysAmountEggs;	
@@ -37,77 +36,84 @@ public class Step2Processor implements ItemProcessor<Chicken, Chicken>{
 	public Chicken process(Chicken item) throws Exception {
 		logger.info("Procesando gallina...");
 		
-		int chickensPutEggs = this.jobExecutionContext.getInt("CHICKENS_PUT_EGGS");
-		int newEggsByChicken = this.jobExecutionContext.getInt("NEW_EGGS_BY_CHICKEN");
-		int eggsDiscarted = this.jobExecutionContext.getInt("EGGS_DISCARTED");
-		String isEggsLimit = this.jobExecutionContext.getString("IS_EGGS_LIMIT");
+		this.getJobExecutionContextValues();
 		
-		Date currentDate;
-		if (useDateSimulator) {
-			currentDate = apiCall.getDate();
-		} else {
-			currentDate = new Date();
-		}
+		Date currentDate = apiCall.getDate();
 		
-		int diffDays = (int)((currentDate.getTime() - item.getLastEggDate().getTime()) / 86400000);
-		
-		if (diffDays >= daysAmountEggs) {
+		if (this.getDifferenceInDays(currentDate, item.getLastEggDate()) >= daysAmountEggs) {
 			
-			if (farm == null) {
-				farm = apiCall.getFarm(item.getFarmId());
-			}
-			
-	    	int eggsCount;
-			try {
-				eggsCount = apiCall.getEggsByFarm(item.getFarmId()).size();
-			} catch (HttpClientErrorException.NotFound ex) {
-				eggsCount = 0;
-			}
+			Farm farm = apiCall.getFarm(item.getFarmId());
+	    	int eggsCount = apiCall.getEggsByFarm(item.getFarmId()).size();
 			
 			for (int i=0; i < eggsAmountByChicken;i++) {
-				//si al insertar el huevo se excede el limite, entonces previamente descarto el huevo mas viejo antes de insertar
-				if ((eggsCount+1) > farm.getEggLimit()) {
-					//descarto huevo
-					Egg egg = apiCall.getOldEgg(farm.getFarmId());
-					EggState eggDiscarted = EggState.Discarded;
-					egg.setState(eggDiscarted.getState());
-					apiCall.updateEgg(egg);
-					logger.info("El huevo con id=[" + egg.getEggId() + "] se ha actualizado con estado '" + eggDiscarted.getState() + "' (Descartado)");
-					eggsDiscarted++;
-				}
+				insertEgg (item.getFarmId(), eggsCount+1, farm.getEggLimit(), currentDate);
 				
-				//inserto huevo
-				Egg newEgg = new Egg();
-				newEgg.setFarmId(item.getFarmId());
-				EggState eggAvailable = EggState.Available;
-				newEgg.setState(eggAvailable.getState());
-				newEgg.setCreationDate(currentDate);
-				EggOrigin eggOrigin = EggOrigin.Deposited;
-				newEgg.setOrigin(eggOrigin.getOrigin());
-				newEgg.setLastStateChangeDate(currentDate);
-				newEgg = apiCall.insertEgg(newEgg);
-				logger.info("Se agrega huevo con id=[" + newEgg.getEggId() + "] con estado '" + eggAvailable.getState() + "' (Disponible)");
+				setEggLimitFlagIfApplied(eggsCount+1, farm.getEggLimit());
 				
-				//verifico si al sumar un huevo se alcanza el limite, y de ser asi, genero el reporte
-				if ((eggsCount+1) == farm.getEggLimit()) {
-					logger.info("SE ALCANZO EL LIMITE DE HUEVOS!");
-					isEggsLimit = "true";
-				}
-				
-				newEggsByChicken++;
+				this.newEggsByChicken++;
 				eggsCount++;
 			}
 			item.setLastEggDate(currentDate);
-			chickensPutEggs++;
+			this.chickensPutEggs++;
 
-			this.jobExecutionContext.putInt("CHICKENS_PUT_EGGS", chickensPutEggs);
-			this.jobExecutionContext.putInt("NEW_EGGS_BY_CHICKEN", newEggsByChicken);
-			this.jobExecutionContext.putInt("EGGS_DISCARTED", eggsDiscarted);
-			this.jobExecutionContext.putString("IS_EGGS_LIMIT", isEggsLimit);
+			setJobExecutionContextValues();
 			
 			return item;
 		} else {
 			return null;
 		}
 	}
+	
+	private void getJobExecutionContextValues() {
+		this.chickensPutEggs = this.jobExecutionContext.getInt("CHICKENS_PUT_EGGS");
+		this.newEggsByChicken = this.jobExecutionContext.getInt("NEW_EGGS_BY_CHICKEN");
+		this.eggsDiscarted = this.jobExecutionContext.getInt("EGGS_DISCARTED");
+		this.isEggsLimit = this.jobExecutionContext.getString("IS_EGGS_LIMIT");
+	}
+	
+	private void setJobExecutionContextValues() {
+		this.jobExecutionContext.putInt("CHICKENS_PUT_EGGS", chickensPutEggs);
+		this.jobExecutionContext.putInt("NEW_EGGS_BY_CHICKEN", newEggsByChicken);
+		this.jobExecutionContext.putInt("EGGS_DISCARTED", eggsDiscarted);
+		this.jobExecutionContext.putString("IS_EGGS_LIMIT", isEggsLimit);
+	}
+
+	private int getDifferenceInDays(Date currentDate, Date itemDate) {
+		return (int)((currentDate.getTime() - itemDate.getTime()) / 86400000);
+	}
+	
+	private void discardOldEgg(String farmId) {
+		Egg egg = apiCall.getOldEgg(farmId);
+		EggState eggDiscarted = EggState.Discarded;
+		egg.setState(eggDiscarted.getState());
+		apiCall.updateEgg(egg);
+		logger.info("El huevo con id=[" + egg.getEggId() + "] se ha actualizado con estado '" + eggDiscarted.getState() + "' (Descartado)");
+	}
+
+	private void insertEgg (String farmId, int eggsCount, long eggLimit, Date currentDate) {
+		//si al insertar el huevo se excede el limite, entonces previamente descarto el huevo mas viejo antes de insertar
+		if (eggsCount > eggLimit) {
+			this.discardOldEgg(farmId);
+			this.eggsDiscarted++;
+		}
+		Egg newEgg = new Egg();
+		newEgg.setFarmId(farmId);
+		EggState eggAvailable = EggState.Available;
+		newEgg.setState(eggAvailable.getState());
+		newEgg.setCreationDate(currentDate);
+		EggOrigin eggOrigin = EggOrigin.Deposited;
+		newEgg.setOrigin(eggOrigin.getOrigin());
+		newEgg.setLastStateChangeDate(newEgg.getCreationDate());
+		newEgg = apiCall.insertEgg(newEgg);
+		logger.info("Se agrega huevo con id=[" + newEgg.getEggId() + "] con estado '" + eggAvailable.getState() + "' (Disponible)");
+	}
+	
+	private void setEggLimitFlagIfApplied(int eggCount, long eggLimit) {
+		//si se alcanza el limite de huevos, entonces seteo flag para generar el reporte
+		if (eggCount == eggLimit) {
+			logger.info("SE ALCANZO EL LIMITE DE HUEVOS!");
+			this.isEggsLimit = "true";
+		}
+	}
+	
 }

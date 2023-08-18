@@ -7,7 +7,6 @@ import org.springframework.batch.item.ExecutionContext;
 import org.springframework.batch.item.ItemProcessor;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.web.client.HttpClientErrorException;
 import com.retooling.batch.entity.Chicken;
 import com.retooling.batch.entity.Egg;
 import com.retooling.batch.entity.Farm;
@@ -16,13 +15,13 @@ public class Step3Processor implements ItemProcessor<Egg, Egg>{
 
 	private static final Logger logger = LoggerFactory.getLogger(Step3Processor.class);
 
-	private Farm farm; 
+	int eggsConvertToChicken;
+	int chickensDiscarted;
+	String isChickensLimit;
+	String isEggsLimit;
 	
 	@Autowired
 	private ApiCall apiCall;
-	
-	@Value("${api.microservice.use-date-simulator}")
-	private boolean useDateSimulator;
 
 	@Value("${batch.config.egg-to-chicken-days}")
 	private int eggToChickensDays;
@@ -34,62 +33,20 @@ public class Step3Processor implements ItemProcessor<Egg, Egg>{
 	public Egg process(Egg item) throws Exception {
 		logger.info("Procesando huevo...");
 		
-		int eggsConvertToChicken = this.jobExecutionContext.getInt("EGGS_CONVERT_TO_CHICKEN");
-		int chickensDiscarted = this.jobExecutionContext.getInt("CHICKENS_DISCARTED");
-		String isChickensLimit = this.jobExecutionContext.getString("IS_CHICKENS_LIMIT");
-		String isEggsLimit = this.jobExecutionContext.getString("IS_EGGS_LIMIT");
+		getJobExecutionContextValues();
 		
-		Date currentDate;
-		if (useDateSimulator) {
-			currentDate = apiCall.getDate();
-		} else {
-			currentDate = new Date();
-		}
+		Date currentDate = apiCall.getDate();
 		
-		int diffDays = (int)((currentDate.getTime() - item.getCreationDate().getTime()) / 86400000);
-		
-		if (diffDays >= eggToChickensDays) {
+		if (this.getDifferenceInDays(currentDate, item.getCreationDate()) >= eggToChickensDays) {
 			
-			if (farm == null) {
-				farm = apiCall.getFarm(item.getFarmId());
-			}
+			Farm farm = apiCall.getFarm(item.getFarmId());
 			
-	    	int chickensCount;
-			try {
-				chickensCount = apiCall.getChickensByFarm(item.getFarmId()).size();
-			} catch (HttpClientErrorException.NotFound ex) {
-				chickensCount = 0;
-			}
+	    	int chickensCount = apiCall.getChickensByFarm(item.getFarmId()).size();
 			
-			//si al insertar la gallina se excede el limite, entonces previamente descarto la gallina mas vieja
-			if ((chickensCount+1) > farm.getChickenLimit()) {
-				//descarto gallina
-				Chicken chicken = apiCall.getOldChicken(farm.getFarmId());
-				ChickenState chickenDiscarted = ChickenState.Discarded;
-				chicken.setState(chickenDiscarted.getState());
-				apiCall.updateChicken(chicken);
-				logger.info("El pollo con id=[" + chicken.getChickenId() + "] se ha actualizado con estado '" + chickenDiscarted.getState() + "' (Descartado)");
-				chickensDiscarted++;
-			}
+			insertChicken (item.getFarmId(), chickensCount+1, farm.getChickenLimit(), currentDate);
 			
-			//inserto gallina
-			Chicken newChicken = new Chicken();
-			newChicken.setFarmId(farm.getFarmId());
-			ChickenState chickenAvailable = ChickenState.Available;
-			newChicken.setState(chickenAvailable.getState());
-			newChicken.setCreationDate(currentDate);
-			ChickenOrigin chickenOrigin = ChickenOrigin.Grown;
-			newChicken.setOrigin(chickenOrigin.getOrigin());
-			newChicken.setLastEggDate(newChicken.getCreationDate());
-			newChicken.setLastStateChangeDate(newChicken.getCreationDate());
-			newChicken = apiCall.insertChicken(newChicken);
-			logger.info("Se agrega pollo con id=[" + newChicken.getChickenId() + "] con estado '" + chickenAvailable.getState() + "' (Disponible)");
+			setChickenLimitFlagIfApplied(chickensCount+1, farm.getChickenLimit());
 			
-			//verifico si al sumar un huevo se alcanza el limite, y de ser asi, genero el reporte
-			if ((chickensCount+1) == farm.getChickenLimit()) {
-				logger.info("SE ALCANZO EL LIMITE DE GALLINAS!");
-				isChickensLimit = "true";
-			}
 			chickensCount++;
 
 			//actualizo el estado del huevo indicando que se convirtió en gallina
@@ -103,14 +60,65 @@ public class Step3Processor implements ItemProcessor<Egg, Egg>{
 				isEggsLimit = "false";
 			}
 			
-			this.jobExecutionContext.putInt("EGGS_CONVERT_TO_CHICKEN", eggsConvertToChicken);
-			this.jobExecutionContext.putInt("CHICKENS_DISCARTED", chickensDiscarted);
-			this.jobExecutionContext.putString("IS_CHICKENS_LIMIT", isChickensLimit);
-			this.jobExecutionContext.putString("IS_EGGS_LIMIT", isEggsLimit);
+			setJobExecutionContextValues();
 			
 			return item;
 		} else {
 			return null;
 		}
 	}
+
+	private int getDifferenceInDays(Date currentDate, Date itemDate) {
+		return (int)((currentDate.getTime() - itemDate.getTime()) / 86400000);
+	}
+	
+	private void getJobExecutionContextValues() {
+		this.eggsConvertToChicken = this.jobExecutionContext.getInt("EGGS_CONVERT_TO_CHICKEN");
+		this.chickensDiscarted = this.jobExecutionContext.getInt("CHICKENS_DISCARTED");
+		this.isChickensLimit = this.jobExecutionContext.getString("IS_CHICKENS_LIMIT");
+		this.isEggsLimit = this.jobExecutionContext.getString("IS_EGGS_LIMIT");
+	}
+
+	private void setJobExecutionContextValues() {
+		this.jobExecutionContext.putInt("EGGS_CONVERT_TO_CHICKEN", eggsConvertToChicken);
+		this.jobExecutionContext.putInt("CHICKENS_DISCARTED", chickensDiscarted);
+		this.jobExecutionContext.putString("IS_CHICKENS_LIMIT", isChickensLimit);
+		this.jobExecutionContext.putString("IS_EGGS_LIMIT", isEggsLimit);
+	}
+
+	private void discardOldChicken(String farmId) {
+		Chicken chicken = apiCall.getOldChicken(farmId);
+		ChickenState chickenDiscarted = ChickenState.Discarded;
+		chicken.setState(chickenDiscarted.getState());
+		apiCall.updateChicken(chicken);
+		logger.info("El pollo con id=[" + chicken.getChickenId() + "] se ha actualizado con estado '" + chickenDiscarted.getState() + "' (Descartado)");		
+	}
+
+	private void insertChicken (String farmId, int chickensCount, long chickenLimit, Date currentDate) {
+		//si al insertar la gallina se excede el limite, entonces previamente descarto la gallina mas vieja antes de insertar
+		if (chickensCount > chickenLimit) {
+			this.discardOldChicken(farmId);
+			chickensDiscarted++;
+		}
+		Chicken newChicken = new Chicken();
+		newChicken.setFarmId(farmId);
+		ChickenState chickenAvailable = ChickenState.Available;
+		newChicken.setState(chickenAvailable.getState());
+		newChicken.setCreationDate(currentDate);
+		ChickenOrigin chickenOrigin = ChickenOrigin.Grown;
+		newChicken.setOrigin(chickenOrigin.getOrigin());
+		newChicken.setLastEggDate(newChicken.getCreationDate());
+		newChicken.setLastStateChangeDate(newChicken.getCreationDate());
+		newChicken = apiCall.insertChicken(newChicken);
+		logger.info("Se agrega pollo con id=[" + newChicken.getChickenId() + "] con estado '" + chickenAvailable.getState() + "' (Disponible)");
+	}
+
+	private void setChickenLimitFlagIfApplied(int chickenCount, long chickenLimit) {
+		//si se alcanza el limite de gallinas, entonces seteo flag para generar el reporte
+		if (chickenCount == chickenLimit) {
+			logger.info("SE ALCANZO EL LIMITE DE GALLINAS!");
+			isChickensLimit = "true";
+		}
+	}
+	
 }

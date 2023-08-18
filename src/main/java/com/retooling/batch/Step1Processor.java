@@ -17,9 +17,6 @@ public class Step1Processor implements ItemProcessor<Chicken, Chicken>{
 
 	@Autowired
 	private ApiCall apiCall;
-	
-	@Value("${api.microservice.use-date-simulator}")
-	private boolean useDateSimulator;
 
 	@Value("${batch.config.chicken-dead-days}")
 	private int chickenDeadDays;
@@ -33,17 +30,10 @@ public class Step1Processor implements ItemProcessor<Chicken, Chicken>{
 		
 		int chickensDead = this.jobExecutionContext.getInt("CHICKENS_DEAD");
 		
-		Date currentDate;
-		if (useDateSimulator) {
-			currentDate = apiCall.getDate();
-		} else {
-			currentDate = new Date();
-		}
+		Date currentDate = apiCall.getDate();
 		
-		//marcar pollo como muerto si supera la cantidad de dias configurada
-		int diffDays = (int)((currentDate.getTime() - item.getCreationDate().getTime()) / 86400000);
-			
-		if (diffDays >= chickenDeadDays) {
+		//marcar gallina como muerta si supera la cantidad de dias configurada
+		if (this.getDifferenceInDays(currentDate, item.getCreationDate()) >= chickenDeadDays) {
 			
 			ChickenState chickenDead = ChickenState.Dead;
 			item.setState(chickenDead.getState());
@@ -54,6 +44,10 @@ public class Step1Processor implements ItemProcessor<Chicken, Chicken>{
 		} else {
 			return null;	
 		}
+	}
+	
+	private int getDifferenceInDays(Date currentDate, Date itemDate) {
+		return (int)((currentDate.getTime() - itemDate.getTime()) / 86400000);
 	}
 	
 }

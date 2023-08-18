@@ -11,13 +11,14 @@ import org.springframework.batch.core.JobExecutionListener;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
-import org.springframework.web.client.HttpClientErrorException;
 
 @Component
 public class JobCompletionNotificationListener implements JobExecutionListener {
 	
     private static final Logger logger = LoggerFactory.getLogger(JobCompletionNotificationListener.class);
 
+	final private String farmId = "1";
+    
 	@Autowired
 	private ApiCall apiCall;
     
@@ -26,7 +27,45 @@ public class JobCompletionNotificationListener implements JobExecutionListener {
 	
     @Override
     public void beforeJob(JobExecution jobExecution) { 
-
+    	
+    	this.initializeContext(jobExecution);
+    	
+    	Date currentDate = null;
+		try {
+			currentDate = apiCall.getDate();
+		} catch (ParseException e) {
+			e.printStackTrace();
+		}
+    	
+    	int eggsCount = apiCall.getEggsByFarm(farmId).size();
+				
+    	int chickensCount = apiCall.getChickensByFarm(farmId).size();
+    	
+    	writeInitialInfoInLog(currentDate, eggsCount, chickensCount);
+    }
+    
+    @Override
+    public void afterJob(JobExecution jobExecution) {
+    	
+		Date currentDate = null;
+		try {
+			currentDate = apiCall.getDate();
+		} catch (ParseException e) {
+			e.printStackTrace();
+		}
+    	
+    	int eggsCount = apiCall.getEggsByFarm(farmId).size();
+				
+    	int chickensCount = apiCall.getChickensByFarm(farmId).size();
+    	
+    	writeFinalInfoInLog(currentDate, eggsCount, chickensCount, jobExecution);
+		
+    	generateReportIfApplied(jobExecution);
+    	
+        logger.info("!!! EL JOB FINALIZO! Por favor verificar los resultados");
+    }
+    
+    private void initializeContext(JobExecution jobExecution) {
     	//step1
     	jobExecution.getExecutionContext().putInt("CHICKENS_DEAD", 0);
     	
@@ -40,70 +79,17 @@ public class JobCompletionNotificationListener implements JobExecutionListener {
     	jobExecution.getExecutionContext().putInt("EGGS_CONVERT_TO_CHICKEN", 0);
     	jobExecution.getExecutionContext().putInt("CHICKENS_DISCARTED", 0);
     	jobExecution.getExecutionContext().putString("IS_CHICKENS_LIMIT", "false");
-    	
-		Date currentDate;
-		if (useDateSimulator) {
-			try {
-				currentDate = apiCall.getDate();
-			} catch (ParseException e) {
-				e.printStackTrace();
-				currentDate = null;
-			}
-		} else {
-			currentDate = new Date();
-		}
-    	
-    	int eggsCount;
-		try {
-			eggsCount = apiCall.getEggsByFarm("1").size();
-		} catch (HttpClientErrorException.NotFound ex) {
-			eggsCount = 0;
-		}
-				
-    	int chickensCount;
-		try {
-			chickensCount = apiCall.getChickensByFarm("1").size();
-		} catch (HttpClientErrorException.NotFound ex) {
-			chickensCount = 0;
-		}
+    }
+    
+    private void writeInitialInfoInLog(Date currentDate, int eggsCount, int chickensCount) {
 		logger.info("********************************************************************************");
 		logger.info("Fecha y hora de inicio: " + (new SimpleDateFormat("YYYY-MM-dd hh:mm:ss").format(currentDate)));
     	logger.info("Cantidad de huevos disponibles ANTES de la ejecución del job: " + eggsCount);
     	logger.info("Cantidad de gallinas disponibles ANTES de la ejecución del job: " + chickensCount);
     	logger.info("********************************************************************************");
     }
-    
-    @Override
-    public void afterJob(JobExecution jobExecution) {
-    	
-    	String idFarm = "1";
-    	
-		Date currentDate;
-		if (useDateSimulator) {
-			try {
-				currentDate = apiCall.getDate();
-			} catch (ParseException e) {
-				e.printStackTrace();
-				currentDate = null;
-			}
-		} else {
-			currentDate = new Date();
-		}
-    	
-    	int eggsCount;
-		try {
-			eggsCount = apiCall.getEggsByFarm(idFarm).size();
-		} catch (HttpClientErrorException.NotFound ex) {
-			eggsCount = 0;
-		}
-				
-    	int chickensCount;
-		try {
-			chickensCount = apiCall.getChickensByFarm(idFarm).size();
-		} catch (HttpClientErrorException.NotFound ex) {
-			chickensCount = 0;
-		}
-    	
+   
+    private void writeFinalInfoInLog(Date currentDate, int eggsCount, int chickensCount, JobExecution jobExecution) {
 		logger.info("********************************************************************************");
 		logger.info("Fecha y hora de fin: " + (new SimpleDateFormat("YYYY-MM-dd hh:mm:ss").format(currentDate)));
     	logger.info("Cantidad de huevos disponibles DESPUES de la ejecución del job: " + eggsCount);
@@ -121,13 +107,14 @@ public class JobCompletionNotificationListener implements JobExecutionListener {
     	logger.info("Cantidad de gallinas que crecieron de un huevo: " + jobExecution.getExecutionContext().getInt("EGGS_CONVERT_TO_CHICKEN"));
     	logger.info("Cantidad de gallinas descartadas: " + jobExecution.getExecutionContext().getInt("CHICKENS_DISCARTED"));
     	logger.info("********************************************************************************");
-		
+    }
+    
+    private void generateReportIfApplied(JobExecution jobExecution) {
     	if (jobExecution.getExecutionContext().getString("IS_EGGS_LIMIT").equals("true") ||
     			jobExecution.getExecutionContext().getString("IS_CHICKENS_LIMIT").equals("true")) {
     		logger.info("Genero reporte de situación de granja por haberse alcanzado uno de los límites");
-			apiCall.generateReport(idFarm);
+			apiCall.generateReport(farmId);
     	}
-    	
-        logger.info("!!! EL JOB FINALIZO! Por favor verificar los resultados");
     }
+    
 }
